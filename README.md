@@ -1,263 +1,313 @@
-# Shopify Inventory Management App
+# Shopify Inventory Management & Sync
 
-A Google Apps Script based inventory management and synchronization system that connects Google Sheets with the Shopify Admin API.
+A Google Apps Script–based inventory synchronization system that connects Google Sheets with the Shopify Admin API to automate inventory quantity updates.
 
-The application allows inventory quantities maintained in Google Sheets to be synchronized with Shopify automatically when inventory values are edited.
+The project uses Google Sheets as an inventory interface and synchronizes edited quantities with Shopify using SKU mapping, location mapping, input validation, caching, and synchronization logs.
 
 ## Overview
 
-This project was built to simplify inventory management by using Google Sheets as an inventory interface and Shopify as the eCommerce inventory platform.
+Manually updating inventory in an e-commerce store can be repetitive and error-prone. This project demonstrates how Google Apps Script can automate inventory updates between Google Sheets and Shopify.
 
-When the available inventory quantity is updated in the Google Sheets `Inventory` sheet, the Apps Script identifies the corresponding Shopify inventory item and location, then updates the inventory level through the Shopify Admin API.
+When a relevant inventory edit is made in the `Inventory` sheet, the script identifies the corresponding Shopify inventory item and location, submits the requested quantity through the Shopify Admin API, and records the result in `Sync_Log`.
 
 ## Features
 
-* Sync inventory quantities from Google Sheets to Shopify
-* SKU-based inventory identification
-* Shopify location mapping
-* Automatic inventory updates
-* SKU mapping with Script Properties caching
-* Automatic cache refresh when a SKU is not found
-* Shopify API pagination handling
-* Inventory synchronization logging
-* Failed synchronization tracking
-* Shopify connection testing
-* SKU cache rebuilding
-* Google Apps Script installable edit trigger support
+- Automated inventory updates triggered by spreadsheet edits
+- SKU-based inventory item identification
+- Shopify inventory location mapping
+- SKU mapping cached using Google Apps Script Script Properties
+- SKU cache refresh when a SKU is not found
+- Shopify product pagination handling
+- Validation of required SKU and location fields
+- Validation of non-negative integer inventory quantities
+- Synchronization success and failure logging
+- Shopify API connection testing
+- SKU lookup utility
+- SKU cache clearing and rebuilding utilities
+- Automatic creation of the `Sync_Log` sheet when required
+- Support for single-cell and multi-row edits involving column C
+- Credential configuration through Script Properties
 
 ## Technology Stack
 
-* Google Apps Script
-* Google Sheets
-* Shopify Admin API
-* JavaScript
-* Shopify REST API
-* Google Apps Script Properties Service
+- **Google Apps Script** — automation and integration logic
+- **Google Sheets** — inventory input and synchronization logs
+- **JavaScript** — application logic
+- **Shopify Admin REST API** — product, location, and inventory operations
+- **Google Apps Script Properties Service** — configuration and SKU cache storage
 
 ## Architecture
 
 ```text
-Google Sheets
-     |
-     | Inventory quantity edited
-     v
+Google Sheets — Inventory
+          |
+          | Relevant inventory edit
+          v
 Google Apps Script
-     |
-     | SKU lookup
-     v
-Shopify Product / Variant
-     |
-     | Inventory Item ID
-     v
-Shopify Location
-     |
-     | Inventory update
-     v
-Shopify Inventory API
-     |
-     v
-Sync_Log
+          |
+          | Validate SKU, location, and quantity
+          v
+SKU Mapping & Location Lookup
+          |
+          | Resolve inventory item and location IDs
+          v
+Shopify Admin REST API
+          |
+          | Submit inventory quantity update
+          v
+Shopify Inventory
+          |
+          v
+Google Sheets — Sync_Log
 ```
 
 ## Google Sheets Structure
 
-### Inventory Sheet
+### 1. Inventory Sheet
 
-The `Inventory` sheet uses the following columns:
+The `Inventory` sheet contains the inventory data used by the synchronization workflow.
 
-| Column | Field     |
-| ------ | --------- |
-| A      | SKU       |
-| B      | Location  |
-| C      | Available |
+| Column | Field | Description |
+|---|---|---|
+| A | SKU | Shopify product variant SKU |
+| B | Location | Shopify inventory location name |
+| C | Available | Requested available inventory quantity |
 
 Example:
 
-| SKU             | Location       | Available |
-| --------------- | -------------- | --------: |
-| PRODUCT-SKU-001 | Main Warehouse |        25 |
-| PRODUCT-SKU-002 | Main Warehouse |        10 |
+| SKU | Location | Available |
+|---|---|---:|
+| PRODUCT-SKU-001 | Main Warehouse | 25 |
+| PRODUCT-SKU-002 | Main Warehouse | 10 |
 
-### Sync_Log Sheet
+**Requirements:**
+- Use SKUs that match product variants in Shopify.
+- Use location names that match Shopify inventory locations.
+- Enter inventory quantities as non-negative whole numbers.
+- The script skips rows with blank quantities.
 
-The application records synchronization results in the `Sync_Log` sheet.
+### 2. Sync_Log Sheet
 
-| Field     | Description                  |
-| --------- | ---------------------------- |
-| Timestamp | Time of synchronization      |
-| SKU       | Product SKU                  |
-| Location  | Shopify location             |
-| Qty       | Requested inventory quantity |
-| Status    | SUCCESS, FAILED, or ERROR    |
-| Message   | Result or error details      |
+The `Sync_Log` sheet records synchronization results.
+
+| Field | Description |
+|---|---|
+| Timestamp | Time of the synchronization attempt |
+| SKU | Product SKU being processed |
+| Location | Requested Shopify location |
+| Qty | Requested inventory quantity |
+| Status | Result status, such as `SUCCESS`, `FAILED`, or `ERROR` |
+| Message | Result details or error information |
+
+The log helps identify successful updates and troubleshoot synchronization failures.
 
 ## How It Works
 
-### 1. Inventory Edit
+### 1. Inventory Edit Trigger
 
-The `updateInventory()` function is triggered when a quantity is edited in column C of the `Inventory` sheet.
+The `updateInventory(e)` function is designed to run through an installable spreadsheet **On edit** trigger.
 
-### 2. SKU Lookup
+It processes relevant edits on the `Inventory` sheet when the edited range includes column C. It supports single-cell edits and multi-row edits involving that column.
 
-The application retrieves Shopify products and variants and creates a mapping between:
+### 2. Input Validation
+
+Before submitting an inventory update, the script checks that:
+
+- The SKU is present.
+- The location is present.
+- The quantity is a non-negative integer.
+
+Rows with invalid required fields or quantities are logged as failures and are not submitted as inventory updates.
+
+Blank quantity cells are skipped.
+
+### 3. SKU Lookup and Caching
+
+The `getSkuMap()` function retrieves Shopify product and variant information and builds a mapping between SKUs and inventory item IDs.
 
 ```text
 SKU → Inventory Item ID
 ```
 
-The mapping is cached using Google Apps Script Script Properties to reduce unnecessary Shopify API requests.
+The mapping is cached in Google Apps Script Script Properties to reduce repeated product retrieval requests.
 
-### 3. Location Lookup
+If an SKU is not found in the cached mapping, the script clears the cache and attempts to rebuild it before reporting that the SKU was not found.
 
-The application retrieves Shopify locations and creates a mapping:
+### 4. Location Lookup
+
+The `getLocationMap()` function retrieves Shopify inventory locations and creates a mapping between location names and location IDs.
 
 ```text
 Location Name → Location ID
 ```
 
-### 4. Inventory Update
+The script uses the resolved location ID when submitting the inventory update.
 
-The Shopify inventory item and location are passed to the Shopify Inventory API.
+### 5. Inventory Update
 
-The requested inventory quantity is then updated in Shopify.
+The `setInventoryLevel()` function submits the requested available quantity for the matching inventory item and location through the Shopify Admin REST API.
 
-### 5. Logging
+The function checks the HTTP response status and reports an error if the update request does not return HTTP 200.
 
-The result is recorded in the `Sync_Log` sheet.
+### 6. Synchronization Logging
 
-Possible statuses include:
+The `logSync()` function records the timestamp, SKU, location, requested quantity, status, and message in `Sync_Log`.
 
-```text
-SUCCESS
-FAILED
-ERROR
-```
+The script records outcomes according to its implemented validation and error-handling logic.
 
 ## Configuration
 
-Sensitive Shopify credentials are stored using Google Apps Script Script Properties.
+Shopify configuration values are stored in Google Apps Script **Script Properties** rather than hardcoded in the source code.
+
+### Required Script Properties
 
 Navigate to:
 
-```text
-Apps Script
-→ Project Settings
-→ Script Properties
-```
+`Apps Script → Project Settings → Script Properties`
 
-Add the following properties:
+Configure the following properties:
 
-```text
-SHOPIFY_STORE
-SHOPIFY_ACCESS_TOKEN
-SHOPIFY_API_VERSION
-```
+| Property | Description |
+|---|---|
+| `SHOPIFY_STORE` | Your Shopify store domain |
+| `SHOPIFY_ACCESS_TOKEN` | Your Shopify Admin API access token |
+| `SHOPIFY_API_VERSION` | The Shopify API version configured for the script |
 
-Example:
+Example values:
 
 ```text
 SHOPIFY_STORE = your-store.myshopify.com
-SHOPIFY_ACCESS_TOKEN = your_shopify_access_token
+SHOPIFY_ACCESS_TOKEN = your_private_access_token
 SHOPIFY_API_VERSION = your_api_version
 ```
 
-Do not commit actual credentials to GitHub.
+These are placeholders, not actual credentials.
+
+The script checks that all three properties are present and validates the store domain format before using the configuration.
+
+**Important:** Use a Shopify API version supported by Shopify. The API version must be compatible with the endpoints and request formats used by the script.
 
 ## Trigger Setup
 
-The inventory synchronization function is designed to run using an installable edit trigger.
+Configure an installable trigger in Google Apps Script.
 
-Configure the trigger as:
+| Setting | Value |
+|---|---|
+| Function to run | `updateInventory` |
+| Event source | From spreadsheet |
+| Event type | On edit |
 
-```text
-Function:
-updateInventory
+Ensure that only one intended trigger is configured for `updateInventory` to avoid duplicate executions.
 
-Event source:
-From spreadsheet
-
-Event type:
-On edit
-```
+The script responds to user edits that trigger the spreadsheet event. Script-generated changes do not independently trigger an installable edit event.
 
 ## Utility Functions
 
-### `testConnection()`
+The project includes the following utility functions:
 
-Tests connectivity with the Shopify Admin API.
+| Function | Purpose |
+|---|---|
+| `testConnection()` | Tests connectivity with the Shopify Admin API using the configured credentials |
+| `findSku()` | Checks whether a predefined test SKU exists in the SKU mapping |
+| `clearSkuCache()` | Deletes the cached `SKU_MAP` property |
+| `rebuildSkuCache()` | Clears and rebuilds the SKU mapping from Shopify |
+| `createLogSheet()` | Creates the `Sync_Log` sheet if it does not exist |
+| `getShopifyConfig()` | Reads and validates the required Script Properties |
 
-### `findSku()`
-
-Tests whether a particular SKU exists in the Shopify SKU mapping.
-
-### `clearSkuCache()`
-
-Clears the cached SKU mapping.
-
-### `rebuildSkuCache()`
-
-Clears the existing SKU cache and rebuilds it from Shopify.
-
-### `createLogSheet()`
-
-Creates the `Sync_Log` sheet if it does not already exist.
+The `findSku()` utility currently uses a predefined SKU in the source code. Update that value if you want to test a different SKU.
 
 ## Error Handling
 
-The application handles common synchronization failures including:
+The script handles several common synchronization failures, including:
 
-* SKU not found
-* Shopify location not found
-* Shopify API errors
-* Invalid inventory updates
-* Failed synchronization requests
+- Missing SKU
+- Missing location
+- SKU not found in the mapping
+- Shopify location not found
+- Invalid inventory quantity
+- Location lookup failures
+- Inventory update request failures
 
-Errors are recorded in the `Sync_Log` sheet.
+The script records relevant failures in `Sync_Log` according to the implemented error-handling logic.
+
+**Current limitation:** SKU retrieval does not yet perform the same explicit HTTP response validation used by the location lookup and inventory update functions. More comprehensive API response validation is a potential future improvement.
+
+## Testing and Verification
+
+The following behaviors have been verified during development:
+
+- Successful connection to the Shopify Admin API
+- Inventory quantity updates initiated from Google Sheets
+- Updated inventory quantity verified in Shopify Admin
+- Synchronization results recorded in `Sync_Log`
+
+Further edge-case testing can cover:
+
+- Invalid SKUs
+- Invalid locations
+- Zero inventory quantities
+- Negative and decimal quantities
+- Multi-row edits
+- Duplicate SKUs across different locations
+- Shopify API errors and rate limits
+
+Testing should use a suitable test product or safely restorable inventory quantities before applying changes to production inventory.
 
 ## Security
 
-No Shopify credentials or access tokens are stored directly in the source code.
+The project uses Google Apps Script Script Properties to store Shopify configuration values outside the source code.
 
-Sensitive configuration is stored using Google Apps Script Script Properties.
+Security recommendations:
 
-Never commit:
+- Never commit real Shopify access tokens or API secrets to GitHub.
+- Do not publish private business data, customer information, or production spreadsheet IDs.
+- Restrict access to the Apps Script project because project editors may be able to access its configuration.
+- Rotate credentials if they are exposed.
+- Review screenshots and logs before publishing them publicly.
 
-* Shopify access tokens
-* API keys
-* API secrets
-* Database credentials
-* Private business data
-* Production spreadsheet IDs
-* Customer information
+Script Properties reduce the risk of accidentally committing credentials in source code, but they should not be treated as a dedicated secrets vault.
 
 ## Project Use Case
 
-This project demonstrates how Google Sheets can be used as an operational inventory interface while Shopify remains the source system for eCommerce inventory.
+This project demonstrates how Google Sheets can serve as an operational inventory interface while Shopify remains the e-commerce inventory platform.
 
-It is particularly useful for businesses that need a lightweight internal inventory management workflow without building a complete standalone inventory management application.
+It is suitable as a portfolio demonstration of a lightweight inventory automation workflow without building a separate inventory management application.
+
+The project showcases practical experience with:
+
+- E-commerce API integration
+- Google Apps Script automation
+- Inventory data validation
+- SKU and location mapping
+- Caching and pagination
+- Error handling and operational logging
 
 ## Future Improvements
 
-Potential improvements include:
+Potential enhancements include:
 
-* Bulk inventory synchronization
-* Low-stock alerts
-* Inventory history
-* Scheduled synchronization
-* Multiple spreadsheet support
-* Inventory adjustment history
-* Dashboard and reporting
-* Shopify GraphQL API migration
-* Retry handling for API failures
-* Rate-limit handling
-* Multi-location inventory management
+- Bulk inventory synchronization
+- Low-stock notifications
+- Inventory change history and auditing
+- Scheduled inventory reconciliation
+- Support for multiple spreadsheets
+- Inventory dashboards and reporting
+- Migration to the Shopify GraphQL Admin API
+- More comprehensive API response validation
+- Retry handling for transient API failures
+- Improved rate-limit handling
+- Expanded automated edge-case testing
+
+These are potential improvements and are not represented as completed features.
 
 ## Author
 
-Anjali Kapse
+**Anjali Kapse**
 
 Shopify Developer | Frontend Developer
 
+GitHub: [AnjaliVijaySirsam](https://github.com/AnjaliVijaySirsam)
+
 ## License
 
-This project is intended for portfolio and educational purposes.
+This project is intended for portfolio and educational purposes. No formal open-source license is currently specified.
