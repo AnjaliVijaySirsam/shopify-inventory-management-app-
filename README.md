@@ -67,11 +67,8 @@ Google Sheets — Sync_Log
 
 The `Inventory` sheet contains the inventory data used by the synchronization workflow.
 
-| Column | Field | Description |
-|---|---|---|
-| A | SKU | Shopify product variant SKU |
-| B | Location | Shopify inventory location name |
-| C | Available | Requested available inventory quantity |
+https://github.com/AnjaliVijaySirsam/shopify-inventory-management-app-/blob/main/Screenshots/inventory-sheet.png
+
 
 Example:
 
@@ -90,16 +87,15 @@ Example:
 
 The `Sync_Log` sheet records synchronization results.
 
-| Field | Description |
-|---|---|
-| Timestamp | Time of the synchronization attempt |
-| SKU | Product SKU being processed |
-| Location | Requested Shopify location |
-| Qty | Requested inventory quantity |
-| Status | Result status, such as `SUCCESS`, `FAILED`, or `ERROR` |
-| Message | Result details or error information |
+https://github.com/AnjaliVijaySirsam/shopify-inventory-management-app-/blob/main/Screenshots/sync-log.png
 
 The log helps identify successful updates and troubleshoot synchronization failures.
+
+### 3. Shopify Inventory Verification
+
+Shows the updated inventory quantity verified in Shopify Admin.
+
+https://github.com/AnjaliVijaySirsam/shopify-inventory-management-app-/blob/main/Screenshots/shopify-inventory-verification.png
 
 ## How It Works
 
