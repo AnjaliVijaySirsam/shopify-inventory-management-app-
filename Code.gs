@@ -1,253 +1,259 @@
-const SHOPIFY_STORE = "YOUR_STORE.myshopify.com";
-
-const ACCESS_TOKEN = "YOUR_SHOPIFY_ACCESS_TOKEN";
-
-const API_VERSION = "YOUR_API_VERSION";
 
 /******************************************************
+ * SHOPIFY CONFIGURATION
+ * Reads credentials from Script Properties
+ ******************************************************/
+ function testScriptRuntime() {
+  Logger.log("Apps Script runtime is working.");
+}
+function getShopifyConfig() {
+  const props = PropertiesService.getScriptProperties();
 
+  const store = props.getProperty("SHOPIFY_STORE");
+  const accessToken = props.getProperty("SHOPIFY_ACCESS_TOKEN");
+  const apiVersion = props.getProperty("SHOPIFY_API_VERSION");
+
+  if (!store || !accessToken || !apiVersion) {
+    throw new Error(
+      "Missing Shopify configuration. Check Script Properties."
+    );
+  }
+
+  if (
+    !/^[a-zA-Z0-9-]+\.myshopify\.com$/.test(store)
+  ) {
+    throw new Error("Invalid Shopify store domain.");
+  }
+
+  return {
+    store: store,
+    accessToken: accessToken,
+    apiVersion: apiVersion
+  };
+}
+
+
+/******************************************************
  * SHOPIFY INVENTORY SYNC
-
  * Trigger: Installable "On Edit"
-
  * Sheet:
-
  * Inventory
-
  *
-
  * Columns:
-
  * A = SKU
-
  * B = Location
-
  * C = Available
-
  ******************************************************/
+
 
 /******************************************************
-
- * MAIN FUNCTION
-
+ * MAIN FUNCTION: VALIDATE AND UPDATE INVENTORY
+ * Handles single-cell and multi-row edits in column C
  ******************************************************/
-
 function updateInventory(e) {
+  if (!e || !e.range) return;
 
-  if (!e) return;
-
-  const sheet = e.range.getSheet();
+  const editedRange = e.range;
+  const sheet = editedRange.getSheet();
 
   if (sheet.getName() !== "Inventory") return;
 
-  // Only Available column (Column C)
-
-  if (e.range.getColumn() != 3) return;
-
-  const row = e.range.getRow();
-
-  if (row == 1) return;
-
-  const sku = String(sheet.getRange(row,1).getValue()).trim();
-
-  const locationName = String(sheet.getRange(row,2).getValue()).trim();
-
-  const qtyCell = sheet.getRange(row,3).getValue();
-
-  // Ignore blank inventory
-
-  if(qtyCell === "" || qtyCell === null){
-
+  // Continue only if the edited range includes column C.
+  if (
+    editedRange.getColumn() > 3 ||
+    editedRange.getLastColumn() < 3
+  ) {
     return;
-
   }
 
-  const qty = Number(qtyCell);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  const logSheet =
+  let logSheet = ss.getSheetByName("Sync_Log");
 
-    SpreadsheetApp.getActiveSpreadsheet()
+  if (!logSheet) {
+    createLogSheet();
+    logSheet = ss.getSheetByName("Sync_Log");
+  }
 
-      .getSheetByName("Sync_Log");
+  const firstRow = Math.max(2, editedRange.getRow());
+  const lastRow = editedRange.getLastRow();
 
-  let skuMap = getSkuMap();
+  if (firstRow > lastRow) return;
 
-  let inventoryItemId = skuMap[sku];
+  // Load the maps once for the entire edit.
+  let skuMap;
+  let locationMap;
 
-  // Refresh cache if SKU not found
-
-  if(!inventoryItemId){
-
-    PropertiesService
-
-      .getScriptProperties()
-
-      .deleteProperty("SKU_MAP");
-
+  try {
     skuMap = getSkuMap();
-
-    inventoryItemId = skuMap[sku];
-
-  }
-
-  if(!inventoryItemId){
-
+    locationMap = getLocationMap();
+  } catch (err) {
     logSync(
-
       logSheet,
-
-      sku,
-
-      locationName,
-
-      qty,
-
-      "FAILED",
-
-      "SKU NOT FOUND"
-
-    );
-
-    return;
-
-  }
-
-  const locationMap = getLocationMap();
-
-  const locationId = locationMap[locationName];
-
-  if(!locationId){
-
-    logSync(
-
-      logSheet,
-
-      sku,
-
-      locationName,
-
-      qty,
-
-      "FAILED",
-
-      "LOCATION NOT FOUND"
-
-    );
-
-    return;
-
-  }
-
-  try{
-
-    setInventoryLevel(
-
-      inventoryItemId,
-
-      locationId,
-
-      qty
-
-    );
-
-    logSync(
-
-      logSheet,
-
-      sku,
-
-      locationName,
-
-      qty,
-
-      "SUCCESS",
-
-      "Updated"
-
-    );
-
-  }catch(err){
-
-    logSync(
-
-      logSheet,
-
-      sku,
-
-      locationName,
-
-      qty,
-
+      "",
+      "",
+      "",
       "ERROR",
-
-      err.message
-
+      "Failed to load Shopify data: " + err.message
     );
-
+    return;
   }
 
+  // Process every affected row.
+  for (let row = firstRow; row <= lastRow; row++) {
+    const sku = String(
+      sheet.getRange(row, 1).getDisplayValue()
+    ).trim();
+
+    const locationName = String(
+      sheet.getRange(row, 2).getDisplayValue()
+    ).trim();
+
+    const qtyCell = sheet.getRange(row, 3).getValue();
+
+    // Preserve existing behavior: blank quantity means no update.
+    if (qtyCell === "" || qtyCell === null) continue;
+
+    const qty = Number(qtyCell);
+
+    // Validate required fields.
+    if (!sku) {
+      logSync(
+        logSheet, sku, locationName, qtyCell,
+        "FAILED", "SKU IS REQUIRED"
+      );
+      continue;
+    }
+
+    if (!locationName) {
+      logSync(
+        logSheet, sku, locationName, qtyCell,
+        "FAILED", "LOCATION IS REQUIRED"
+      );
+      continue;
+    }
+
+    // Inventory quantities must be non-negative integers.
+    if (
+      typeof qtyCell === "boolean" ||
+      (typeof qtyCell === "string" && qtyCell.trim() === "") ||
+      !Number.isFinite(qty) ||
+      !Number.isInteger(qty) ||
+      qty < 0
+    ) {
+      logSync(
+        logSheet, sku, locationName, qtyCell,
+        "FAILED", "INVALID QUANTITY: USE A NON-NEGATIVE INTEGER"
+      );
+      continue;
+    }
+
+    // Find the Shopify inventory item.
+    let inventoryItemId = skuMap[sku];
+
+    if (!inventoryItemId) {
+      // Refresh cache once in case the product was added recently.
+      try {
+        PropertiesService
+          .getScriptProperties()
+          .deleteProperty("SKU_MAP");
+
+        skuMap = getSkuMap();
+        inventoryItemId = skuMap[sku];
+      } catch (err) {
+        logSync(
+          logSheet, sku, locationName, qty,
+          "ERROR", "SKU lookup failed: " + err.message
+        );
+        continue;
+      }
+    }
+
+    if (!inventoryItemId) {
+      logSync(
+        logSheet, sku, locationName, qty,
+        "FAILED", "SKU NOT FOUND"
+      );
+      continue;
+    }
+
+    const locationId = locationMap[locationName];
+
+    if (!locationId) {
+      logSync(
+        logSheet, sku, locationName, qty,
+        "FAILED", "LOCATION NOT FOUND"
+      );
+      continue;
+    }
+
+    // Update Shopify and record the outcome.
+    try {
+      setInventoryLevel(
+        inventoryItemId,
+        locationId,
+        qty
+      );
+
+      logSync(
+        logSheet, sku, locationName, qty,
+        "SUCCESS", "Updated"
+      );
+
+    } catch (err) {
+      logSync(
+        logSheet, sku, locationName, qty,
+        "ERROR", err.message
+      );
+    }
+  }
 }
 
 /******************************************************
-
  * LOCATION MAP
-
  ******************************************************/
 
-function getLocationMap(){
+function getLocationMap() {
+  const config = getShopifyConfig();
 
   const url =
+    `https://${config.store}/admin/api/${config.apiVersion}/locations.json`;
 
-`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/locations.json`;
+  const response = UrlFetchApp.fetch(url, {
+    method: "get",
+    headers: {
+      "X-Shopify-Access-Token": config.accessToken
+    },
+    muteHttpExceptions: true
+  });
 
-  const response =
+  const code = response.getResponseCode();
+  const text = response.getContentText();
 
-    UrlFetchApp.fetch(url,{
+  if (code !== 200) {
+    throw new Error("Location lookup failed (" + code + "): " + text);
+  }
 
-      method:"get",
+  const json = JSON.parse(text);
+  const map = {};
 
-      headers:{
-
-        "X-Shopify-Access-Token":ACCESS_TOKEN
-
-      }
-
-    });
-
-  const json =
-
-    JSON.parse(response.getContentText());
-
-  const map={};
-
-  json.locations.forEach(function(location){
-
-      map[
-
-        String(location.name).trim()
-
-      ] = location.id;
-
+  json.locations.forEach(function(location) {
+    map[String(location.name).trim()] = location.id;
   });
 
   return map;
-
 }
 
+
 /******************************************************
-
  * SKU CACHE
-
  ******************************************************/
-
 function getSkuMap(){
-
+const config = getShopifyConfig();
   const props =
-
     PropertiesService.getScriptProperties();
 
   const cache =
-
     props.getProperty("SKU_MAP");
 
   if(cache){
@@ -259,29 +265,24 @@ function getSkuMap(){
   const map={};
 
   let url =
-
-`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/products.json?limit=250`;
+  `https://${config.store}/admin/api/${config.apiVersion}/products.json?limit=250`;
 
   const options={
 
       method:"get",
 
-      headers:{
-
-          "X-Shopify-Access-Token":ACCESS_TOKEN
-
-      }
+      headers: {
+  "X-Shopify-Access-Token": config.accessToken
+}
 
   };
 
   while(url){
 
       const response =
-
           UrlFetchApp.fetch(url,options);
 
       const json =
-
           JSON.parse(response.getContentText());
 
       json.products.forEach(function(product){
@@ -291,9 +292,7 @@ function getSkuMap(){
               if(variant.sku){
 
                   map[
-
                     String(variant.sku).trim()
-
                   ] = variant.inventory_item_id;
 
               }
@@ -303,21 +302,16 @@ function getSkuMap(){
       });
 
       const link =
-
           response.getHeaders()["Link"];
 
       url =
-
           getNextPageUrl(link);
 
   }
 
   props.setProperty(
-
       "SKU_MAP",
-
       JSON.stringify(map)
-
   );
 
   return map;
@@ -326,119 +320,85 @@ function getSkuMap(){
 
 
 /******************************************************
-
  * UPDATE INVENTORY IN SHOPIFY
-
  ******************************************************/
 
 function setInventoryLevel(inventoryItemId, locationId, quantity) {
+  const config = getShopifyConfig();
 
   const url =
-
-    `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/inventory_levels/set.json`;
+    `https://${config.store}/admin/api/${config.apiVersion}/inventory_levels/set.json`;
 
   const payload = {
-
     location_id: Number(locationId),
-
     inventory_item_id: Number(inventoryItemId),
-
     available: Number(quantity)
-
   };
 
   const response = UrlFetchApp.fetch(url, {
-
     method: "post",
-
     contentType: "application/json",
-
     headers: {
-
-      "X-Shopify-Access-Token": ACCESS_TOKEN
-
+      "X-Shopify-Access-Token": config.accessToken
     },
-
     payload: JSON.stringify(payload),
-
     muteHttpExceptions: true
-
   });
 
   const code = response.getResponseCode();
-
-  const text = response.getContentText();
+  const responseText = response.getContentText();
 
   if (code !== 200) {
-
-    throw new Error(text);
-
+    throw new Error(
+      "Inventory update failed (" + code + "): " + responseText
+    );
   }
 
-  return JSON.parse(text);
-
+  return JSON.parse(responseText);
 }
 
+
 /******************************************************
-
  * HANDLE PAGINATION
-
  ******************************************************/
-
 function getNextPageUrl(linkHeader) {
 
   if (!linkHeader) return null;
 
   const match =
-
     linkHeader.match(/<([^>]+)>;\s*rel="next"/);
 
   return match ? match[1] : null;
-
 }
 
 /******************************************************
-
  * LOG RESULTS
-
  ******************************************************/
-
 function logSync(sheet, sku, location, qty, status, message) {
 
   sheet.appendRow([
-
     new Date(),
-
     sku,
-
     location,
-
     qty,
-
     status,
-
     message
-
   ]);
 
 }
 
 /******************************************************
-
  * FIND SKU (FOR TESTING)
-
  ******************************************************/
-
 function findSku() {
 
-  const sku = "YOUR_TEST_SKU";
+  const sku = "LF-SL-DC-OF-NV-11";
 
   const skuMap = getSkuMap();
 
   if (skuMap[sku]) {
 
     Logger.log("FOUND");
-
     Logger.log(skuMap[sku]);
 
   } else {
@@ -450,17 +410,12 @@ function findSku() {
 }
 
 /******************************************************
-
  * CLEAR SKU CACHE
-
  ******************************************************/
-
 function clearSkuCache() {
 
   PropertiesService
-
     .getScriptProperties()
-
     .deleteProperty("SKU_MAP");
 
   Logger.log("SKU cache cleared");
@@ -468,11 +423,8 @@ function clearSkuCache() {
 }
 
 /******************************************************
-
  * REBUILD SKU CACHE
-
  ******************************************************/
-
 function rebuildSkuCache() {
 
   clearSkuCache();
@@ -484,11 +436,8 @@ function rebuildSkuCache() {
 }
 
 /******************************************************
-
  * CREATE LOG SHEET IF MISSING
-
  ******************************************************/
-
 function createLogSheet() {
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -500,19 +449,12 @@ function createLogSheet() {
     sheet = ss.insertSheet("Sync_Log");
 
     sheet.appendRow([
-
       "Timestamp",
-
       "SKU",
-
       "Location",
-
       "Qty",
-
       "Status",
-
       "Message"
-
     ]);
 
   }
@@ -520,29 +462,35 @@ function createLogSheet() {
 }
 
 /******************************************************
-
  * TEST SHOPIFY CONNECTION
-
  ******************************************************/
 
 function testConnection() {
+  const config = getShopifyConfig();
 
   const url =
-
-    `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/shop.json`;
+    `https://${config.store}/admin/api/${config.apiVersion}/shop.json`;
 
   const response = UrlFetchApp.fetch(url, {
-
     method: "get",
-
     headers: {
-
-      "X-Shopify-Access-Token": ACCESS_TOKEN
-
-    }
-
+      "X-Shopify-Access-Token": config.accessToken
+    },
+    muteHttpExceptions: true
   });
 
-  Logger.log(response.getContentText());
+  const code = response.getResponseCode();
 
+  if (code !== 200) {
+    throw new Error(
+      "Shopify connection failed (" + code + "): " +
+      response.getContentText()
+    );
+  }
+
+  const data = JSON.parse(response.getContentText());
+
+  Logger.log("Shopify connection successful.");
+  Logger.log("Store name: " + data.shop.name);
 }
+
